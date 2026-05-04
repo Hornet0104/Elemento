@@ -498,83 +498,69 @@ int main(void) {
 
     broadcast_state();
 
-    // ════════════════════════════════════════════════════════════
-    //  GAME LOOP
-    // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+//  GAME LOOP (Same time of attack)
+// ════════════════════════════════════════════════════════════════
     while (1) {
-        int atk = gs.turn;
-        int def = 1 - atk;
+        // ── 1. Both players choose elements ──────────────────────
+        for (int i = 0; i < 2; i++) {
+            int opp = 1 - i;
+            send_str(i, MSG_YOUR_TURN, "Choose your element for this round!\n");
+            send_str(opp, MSG_WAIT_TURN, "Waiting for opponent to choose…\n");
 
-        // ── Notify whose turn ────────────────────────────────────
-        send_str(atk, MSG_YOUR_TURN,
-            "Your turn! \n");
-        send_str(def, MSG_WAIT_TURN,
-            "Waiting for opponent to choose…\n");
+            if (recv_packet(client_fd[i], &pkt) <= 0) goto cleanup;
 
-        // ── Receive element choice from active player ────────────
-        if (recv_packet(client_fd[atk], &pkt) <= 0) {
-            printf(RED "Player %d disconnected.\n" RST, atk+1);
-            break;
-        }
-        if (pkt.type == MSG_CHAT) {
-            // relay chat to other player
-            char chat_buf[BUFSIZE];
-            snprintf(chat_buf, sizeof(chat_buf), "[%s]: %s",
-                gs.p[atk].name, pkt.payload);
-            send_str(def, MSG_CHAT, chat_buf);
-            // re-poll (simple: just loop again — for production use select())
-            if (recv_packet(client_fd[atk], &pkt) <= 0) break;
-        }
-
-        int choice = atoi(pkt.payload);
-        if (choice < 1 || choice > 4) choice = 1;
-        gs.p[atk].element = (Element)(choice - 1);
-
-        // Apply Lupa stage4 HP buff if switching to Lupa in stage 4
-        if (gs.p[atk].element == LUPA && gs.stage >= 4) {
-            if (gs.p[atk].max_hp == MAX_HP) {
-                gs.p[atk].max_hp += EARTH_BONUS_HP;
-                if (gs.p[atk].hp == MAX_HP) gs.p[atk].hp = gs.p[atk].max_hp;
+            if (pkt.type == MSG_CHAT) {
+                char chat_buf[BUFSIZE];
+                snprintf(chat_buf, sizeof(chat_buf), "[%s]: %s", gs.p[i].name, pkt.payload);
+                send_str(opp, MSG_CHAT, chat_buf);
+                if (recv_packet(client_fd[i], &pkt) <= 0) goto cleanup;
             }
+
+            int choice = atoi(pkt.payload);
+            if (choice < 1 || choice > 4) choice = 1;
+            gs.p[i].element = (Element)(choice - 1);
         }
 
-        // Announce element choice
+        // ── 2. Reveal the player's choices ────────────────────────────────────
         char choice_msg[BUFSIZE];
         snprintf(choice_msg, sizeof(choice_msg),
-            "⚔  %s chose %s!\n",
-            gs.p[atk].name, ELEM_NAME[(int)gs.p[atk].element]);
+            "\n✨ %s chose %s  VS  %s chose %s!\n",
+            gs.p[0].name, ELEM_NAME[(int)gs.p[0].element],
+            gs.p[1].name, ELEM_NAME[(int)gs.p[1].element]);
         broadcast_str(MSG_ROLL, choice_msg);
 
-        // ── Process turn ─────────────────────────────────────────
-        int game_over = process_turn(atk);
+        // ── 3. Process both turns ────────────────────────────────
+        // We call process_turn for both, even if one "dies" mid-round
+        process_turn(0); 
+        broadcast_state();
+        
+        process_turn(1);
         broadcast_state();
 
-        if (game_over) {
+        // ── 4. Check for game over ───────────────────────────────
+        // Only exit the loop AFTER both players have attacked
+        if (gs.p[0].hp <= 0 || gs.p[1].hp <= 0) {
             char winner[BUFSIZE];
-            // Determine winner
-            int w = (gs.p[0].hp > 0) ? 0 : 1;
             if (gs.p[0].hp <= 0 && gs.p[1].hp <= 0) {
-                snprintf(winner, sizeof(winner),
-                    "\n🌟 DRAW! Both warriors fall!\n");
+                snprintf(winner, sizeof(winner), "\n🌟 DRAW! Both warriors fall!\n");
             } else {
+                int w = (gs.p[0].hp > 0) ? 0 : 1;
                 snprintf(winner, sizeof(winner),
                     "\n🏆 ══════════════════════════════ 🏆\n"
                     "  WINNER: %s\n"
-                    "  (%s has been defeated!)\n"
                     "🏆 ══════════════════════════════ 🏆\n",
-                    gs.p[w].name, gs.p[1-w].name);
+                    gs.p[w].name);
             }
             broadcast_str(MSG_GAMEOVER, winner);
-            printf(MAG "%s" RST, winner);
             break;
         }
 
-        // ── Advance turn / round / stage ─────────────────────────
-        gs.turn = def;
-        if (gs.turn == 0) gs.round++;
+        // ── Advance round / stage ───────────────────────────────
+        gs.round++;
         check_stage_up();
     }
-
+cleanup:
     printf(CYN "Server shutting down.\n" RST);
     close(client_fd[0]);
     close(client_fd[1]);
